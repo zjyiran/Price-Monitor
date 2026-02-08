@@ -1,7 +1,7 @@
 import yfinance as yf
 import requests
 import json
-import re
+import pandas as pd
 from datetime import datetime
 
 # User Configuration
@@ -60,7 +60,6 @@ def get_semiconductor_prices():
             
             if len(data) >= 1:
                 current_price = data['Close'].iloc[-1]
-                # Calculate change if we have 2 days of data
                 if len(data) >= 2:
                     prev_price = data['Close'].iloc[-2]
                     change = current_price - prev_price
@@ -83,47 +82,57 @@ def get_semiconductor_prices():
 
 def get_lipf6_price():
     """
-    Scrapes LiPF6 price from SunSirs (生意社).
+    Scrapes LiPF6 price from SunSirs (生意社) using Pandas.
     Target: https://www.sunsirs.com/uk/prodetail-1432.html
     """
     url = "https://www.sunsirs.com/uk/prodetail-1432.html"
     try:
-        # 使用完整的真实浏览器 Header，防止被简单的反爬拦截
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
         }
         
-        # 增加 verify=False 以防服务器 SSL 证书链不完整导致报错（生意社偶有此问题）
-        response = requests.get(url, headers=headers, timeout=20) # verify=False removed to avoid warning spam, usually fine.
+        # 1. Fetch raw HTML
+        # verify=False is important for GitHub Actions to avoid SSL errors with some CN sites
+        response = requests.get(url, headers=headers, timeout=30, verify=False)
         
         if response.status_code != 200:
-            print(f"SunSirs returned status code: {response.status_code}")
+            print(f"SunSirs Error: Status Code {response.status_code}")
+            # print(response.text[:200]) # Debug: Print first 200 chars if failed
             return None
 
-        # 正则逻辑说明：
-        # 1. 寻找 "Lithium hexafluorophosphate" (第一列)
-        # 2. 跳过中间的标签 (如 Sector 列: <td ...>Chemical</td>)
-        # 3. 提取第三列的价格数字
-        # 使用 re.DOTALL 让 . 匹配换行符，使用 re.IGNORECASE 忽略大小写
-        pattern = r'Lithium hexafluorophosphate.*?</td>\s*<td[^>]*>.*?</td>\s*<td[^>]*>\s*([\d\.]+)\s*</td>'
+        # 2. Parse tables using Pandas (Robust to whitespace/formatting changes)
+        dfs = pd.read_html(response.text)
         
-        match = re.search(pattern, response.text, re.DOTALL | re.IGNORECASE)
-        
-        if match:
-            price_str = match.group(1)
-            return {
-                "name": "六氟磷酸锂 (LiPF6)",
-                "price": float(price_str),
-                "unit": "元/吨",
-                "source": "SunSirs"
-            }
-        else:
-            print("Failed to match regex pattern in SunSirs response.")
-            # 调试：如果有问题，可以取消下面注释查看网页部分内容
-            # print(response.text[:2000])
+        # 3. Iterate through tables to find the one with our product
+        for df in dfs:
+            # Check if any string column contains the product name
+            # SunSirs table usually has columns like: [Product, Sector, Price, Date]
+            # We convert the dataframe to string to search easily
+            mask = df.apply(lambda x: x.astype(str).str.contains("Lithium hexafluorophosphate", case=False, regex=False)).any(axis=1)
             
+            if mask.any():
+                target_row = df[mask].iloc[0]
+                # Usually Price is in the 3rd column (index 2), but let's look for a number
+                # Convert row to list
+                row_values = target_row.tolist()
+                
+                for val in row_values:
+                    # Look for a value that looks like a price (float > 1000)
+                    try:
+                        price_val = float(str(val).replace(',', '').strip())
+                        if price_val > 1000: # Simple filter to distinguish from small numbers
+                            return {
+                                "name": "六氟磷酸锂 (LiPF6)",
+                                "price": price_val,
+                                "unit": "元/吨",
+                                "source": "SunSirs"
+                            }
+                    except ValueError:
+                        continue
+        
+        print("SunSirs Warning: Product found but could not parse price from table.")
+
     except Exception as e:
         print(f"Error fetching LiPF6 from SunSirs: {e}")
     
@@ -210,7 +219,8 @@ if __name__ == "__main__":
     if lipf6:
         material_data.append(lipf6)
     else:
-        material_data.append({"name": "六氟磷酸锂 (LiPF6)", "error": "Fetch failed (SunSirs)"})
+        # Fallback message
+        material_data.append({"name": "六氟磷酸锂 (LiPF6)", "error": "Fetch Failed (Check Logs)"})
     
     # VC Placeholder
     material_data.append({"name": "碳酸亚乙烯酯 (VC)", "error": "No Source"})
