@@ -17,7 +17,6 @@ def get_gold_prices():
     for sym, name in symbols.items():
         try:
             ticker = yf.Ticker(sym)
-            # Fetch 2 days to calculate change
             data = ticker.history(period="2d")
             if len(data) >= 2:
                 current_price = data['Close'].iloc[-1]
@@ -45,14 +44,9 @@ def get_gold_prices():
 
 def get_semiconductor_prices():
     """
-    Fetches semiconductor stock prices using yfinance.
-    Covers: SK Hynix, Samsung Electronics, Kioxia.
+    Fetches semiconductor stock prices (SK Hynix, Samsung, Kioxia).
     """
     results = {}
-    # Tickers:
-    # 000660.KS = SK Hynix (KRW)
-    # 005930.KS = Samsung Electronics (KRW)
-    # 285A.T    = Kioxia Holdings (JPY)
     symbols = {
         "000660.KS": {"name": "SK Hynix", "unit": "₩"},
         "005930.KS": {"name": "Samsung Electronics", "unit": "₩"},
@@ -90,34 +84,46 @@ def get_semiconductor_prices():
 def get_lipf6_price():
     """
     Scrapes LiPF6 price from SunSirs (生意社).
-    URL: https://www.sunsirs.com/uk/prodetail-1432.html
+    Target: https://www.sunsirs.com/uk/prodetail-1432.html
     """
     url = "https://www.sunsirs.com/uk/prodetail-1432.html"
     try:
+        # 使用完整的真实浏览器 Header，防止被简单的反爬拦截
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
         }
-        response = requests.get(url, headers=headers, timeout=15)
         
-        # 1. Check for product name to ensure we are on the right page
-        if "Lithium hexafluorophosphate" in response.text:
-            # Regex to find the price in the table row corresponding to the product
-            # Looking for: <td>Lithium hexafluorophosphate</td> ... <td>PRICE</td>
-            match = re.search(r'Lithium hexafluorophosphate.*?</td>\s*<td>.*?</td>\s*<td>\s*([\d\.]+)\s*</td>', response.text, re.DOTALL)
-            
-            if match:
-                price_str = match.group(1)
-                return {
-                    "name": "六氟磷酸锂 (LiPF6)",
-                    "price": float(price_str),
-                    "unit": "元/吨",
-                    "source": "SunSirs (生意社)"
-                }
-            else:
-                print("Could not find price pattern in SunSirs page.")
-        else:
-             print("Could not find product name in SunSirs page.")
+        # 增加 verify=False 以防服务器 SSL 证书链不完整导致报错（生意社偶有此问题）
+        response = requests.get(url, headers=headers, timeout=20) # verify=False removed to avoid warning spam, usually fine.
+        
+        if response.status_code != 200:
+            print(f"SunSirs returned status code: {response.status_code}")
+            return None
 
+        # 正则逻辑说明：
+        # 1. 寻找 "Lithium hexafluorophosphate" (第一列)
+        # 2. 跳过中间的标签 (如 Sector 列: <td ...>Chemical</td>)
+        # 3. 提取第三列的价格数字
+        # 使用 re.DOTALL 让 . 匹配换行符，使用 re.IGNORECASE 忽略大小写
+        pattern = r'Lithium hexafluorophosphate.*?</td>\s*<td[^>]*>.*?</td>\s*<td[^>]*>\s*([\d\.]+)\s*</td>'
+        
+        match = re.search(pattern, response.text, re.DOTALL | re.IGNORECASE)
+        
+        if match:
+            price_str = match.group(1)
+            return {
+                "name": "六氟磷酸锂 (LiPF6)",
+                "price": float(price_str),
+                "unit": "元/吨",
+                "source": "SunSirs"
+            }
+        else:
+            print("Failed to match regex pattern in SunSirs response.")
+            # 调试：如果有问题，可以取消下面注释查看网页部分内容
+            # print(response.text[:2000])
+            
     except Exception as e:
         print(f"Error fetching LiPF6 from SunSirs: {e}")
     
@@ -125,15 +131,15 @@ def get_lipf6_price():
 
 def send_to_feishu(gold_prices, semi_prices, material_prices):
     """
-    Sends the price data to Feishu via Webhook.
+    Sends the combined price data to Feishu.
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     content = f"📊 **Daily Price Monitoring Update**\n🕒 Time: {now}\n\n"
     
-    # 1. Precious Metals Section
+    # 1. Precious Metals
     content += "🏆 **Precious Metals**\n"
     if not gold_prices:
-        content += "⚠️ Failed to fetch gold price data.\n"
+        content += "⚠️ Failed to fetch gold data.\n"
     else:
         for name, info in gold_prices.items():
             trend = "📈" if info['change'] >= 0 else "📉"
@@ -141,7 +147,7 @@ def send_to_feishu(gold_prices, semi_prices, material_prices):
             content += f"   Price: `{info['unit']}{info['price']:,.2f}`\n"
             content += f"   Change: {trend} `{info['change']:+.2f}` (`{info['change_percent']:+.2f}%`)\n"
     
-    # 2. Semiconductor Section
+    # 2. Semiconductors
     content += "\n💾 **Memory & Storage**\n"
     if not semi_prices:
         content += "⚠️ Failed to fetch semiconductor data.\n"
@@ -156,10 +162,10 @@ def send_to_feishu(gold_prices, semi_prices, material_prices):
                 content += f"   Price: `{info['unit']}{info['price']:,.0f}`\n"
                 content += f"   Change: {trend} `{info['change']:+.0f}` (`{info['change_percent']:+.2f}%`)\n"
 
-    # 3. Battery Materials Section
+    # 3. Battery Materials
     content += "\n🔋 **Battery Materials**\n"
     if not material_prices:
-        content += "⚠️ Failed to fetch material price data.\n"
+        content += "⚠️ Failed to fetch material data.\n"
     else:
         for item in material_prices:
             if "error" in item:
@@ -187,28 +193,26 @@ def send_to_feishu(gold_prices, semi_prices, material_prices):
         if response.status_code == 200:
             print("Successfully sent to Feishu.")
         else:
-            print(f"Failed to send to Feishu. Status: {response.status_code}, Response: {response.text}")
+            print(f"Failed to send to Feishu. Status: {response.status_code}")
     except Exception as e:
         print(f"Error sending to Feishu: {e}")
 
 if __name__ == "__main__":
     print("Starting price fetch...")
     
-    # Fetch Data
     gold_data = get_gold_prices()
     semi_data = get_semiconductor_prices()
     
     material_data = []
     
-    # Fetch LiPF6 from SunSirs
+    # Fetch LiPF6
     lipf6 = get_lipf6_price()
     if lipf6:
         material_data.append(lipf6)
     else:
-        material_data.append({"name": "六氟磷酸锂 (LiPF6)", "error": "Fetch failed"})
-
-    # Placeholder for VC (still blocked/no easy source)
+        material_data.append({"name": "六氟磷酸锂 (LiPF6)", "error": "Fetch failed (SunSirs)"})
+    
+    # VC Placeholder
     material_data.append({"name": "碳酸亚乙烯酯 (VC)", "error": "No Source"})
     
-    # Send all data
     send_to_feishu(gold_data, semi_data, material_data)
